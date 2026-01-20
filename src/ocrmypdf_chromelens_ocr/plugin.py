@@ -150,7 +150,7 @@ def add_options(parser):
 class ChromeLensEngine(OcrEngine):
     @staticmethod
     def version():
-        return "1.0.0"
+        return "1.0.1"
 
     @classmethod
     def creator_tag(cls, options=None):
@@ -177,16 +177,26 @@ class ChromeLensEngine(OcrEngine):
         try:
             with Image.open(input_file) as img:
                 width, height = img.size
-                MAX_DIMENSION = 8192
+                MAX_DIMENSION = 2400
                 process_img = img
+
+                # Pillow's .convert('RGB') turns transparent pixels BLACK.
+                # We must composite the image over a white background.
                 if process_img.mode in ('RGBA', 'LA') or (process_img.mode == 'P' and 'transparency' in process_img.info):
+                    process_img = process_img.convert('RGBA')
+                    background = Image.new('RGB', process_img.size, (255, 255, 255))
+                    background.paste(process_img, mask=process_img.split()[-1])
+                    process_img = background
+                elif process_img.mode != 'RGB':
                     process_img = process_img.convert('RGB')
+
                 if max(width, height) > MAX_DIMENSION:
                     scale = MAX_DIMENSION / max(width, height)
                     new_w = int(width * scale)
                     new_h = int(height * scale)
                     logger.debug(f"Downscaling from {width}x{height} to {new_w}x{new_h}")
                     process_img = process_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
                 buffer = io.BytesIO()
                 process_img.save(buffer, format="PNG")
                 img_bytes = buffer.getvalue()
@@ -333,7 +343,7 @@ class ChromeLensEngine(OcrEngine):
             try:
                 # Random sleep to mitigate rate limiting
                 time.sleep(random.uniform(0.5, 1.5))
-                
+
                 response = requests.post(
                     LENS_PROTO_ENDPOINT, 
                     data=proto_bytes, 
@@ -440,8 +450,15 @@ class ChromeLensEngine(OcrEngine):
                         geo = MiniProto(word[4][0]).parse()
                         if 1 in geo:
                             word_bbox, _ = self._parse_geometry(geo[1][0], img_w, img_h)
-                    if word_bbox:
-                        line_struct['words'].append({'text': text_val, 'bbox': word_bbox})
+                    
+                    # --- Relaxed Parsing: Inherit bbox if missing ---
+                    if word_bbox is None:
+                        if line_struct['bbox']:
+                            word_bbox, _ = line_struct['bbox'], 0
+                        else:
+                            word_bbox = [0, 0, 1, 1]
+
+                    line_struct['words'].append({'text': text_val, 'bbox': word_bbox})
                 
                 if not line_struct['bbox'] and line_struct['words']:
                     line_struct['bbox'] = union_bboxes([w['bbox'] for w in line_struct['words']])
