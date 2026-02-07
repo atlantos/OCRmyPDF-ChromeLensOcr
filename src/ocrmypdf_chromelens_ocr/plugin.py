@@ -165,7 +165,7 @@ def add_options(parser):
 class ChromeLensEngine(OcrEngine):
     @staticmethod
     def version():
-        return "1.0.1"
+        return "1.0.2"
 
     @classmethod
     def creator_tag(cls, options=None):

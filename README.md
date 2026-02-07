@@ -8,6 +8,19 @@ A plugin for [OCRmyPDF](https://github.com/ocrmypdf/OCRmyPDF) that uses the **Go
 -   **Structure Preservation**: Correctly handles multi-column layouts and vertical text flows via strict API parsing and rotation-aware sorting.
 -   **Smart De-hyphenation**: Merges words broken across lines while respecting punctuation dashes.
 
+***
+
+## ⚠️ Compatibility Warning
+
+**This plugin is not currently compatible with OCRmyPDF v17 or higher.**
+
+OCRmyPDF v17 introduced breaking changes to the plugin interface (migrating from `argparse.Namespace` to `OcrOptions` objects). Please use an older version of OCRmyPDF (v16.x or lower) until this plugin is updated.
+
+To install a compatible version:
+```bash
+pip install "ocrmypdf<17"
+```
+
 ## Installation
 
 ### Prerequisites
@@ -16,6 +29,11 @@ You must have `ocrmypdf` installed.
 ### Install from Git
 ```bash
 pip install git+https://github.com/atlantos/OCRmyPDF-ChromeLens-Ocr.git
+```
+
+### Install from Pip
+```bash
+pip install ocrmypdf-chromelens-ocr
 ```
 
 ## Usage
