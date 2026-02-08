@@ -165,7 +165,7 @@ def add_options(parser):
 class ChromeLensEngine(OcrEngine):
     @staticmethod
     def version():
-        return "1.0.2"
+        return "1.0.3"
 
     @classmethod
     def creator_tag(cls, options=None):
@@ -306,39 +306,57 @@ class ChromeLensEngine(OcrEngine):
 
     def _create_lens_proto_request(self, image_bytes, width, height):
         timestamp = int(time.time() * 1000)
+        
+        # 1. Request ID
         request_id = ProtoWriter()
         request_id.add_varint(1, timestamp)
         request_id.add_varint(2, 1) 
-        request_id.add_varint(3, 1) 
+        
+        # 2. Client Context
         locale_context = ProtoWriter()
         locale_context.add_string(1, 'en') 
         locale_context.add_string(2, 'US') 
         locale_context.add_string(3, 'America/New_York') 
-        applied_filter = ProtoWriter()
-        applied_filter.add_varint(1, 7)
-        applied_filters = ProtoWriter()
-        applied_filters.add_message(1, applied_filter)
+        
         client_context = ProtoWriter()
-        client_context.add_varint(1, 3) 
+        client_context.add_varint(1, 6) 
         client_context.add_varint(2, 4) 
         client_context.add_message(4, locale_context)
-        client_context.add_message(17, applied_filters)
+        # Note: We aren't adding filters here, PDF mode usually implies full text
+        
+        # 3. Request Context
         request_context = ProtoWriter()
         request_context.add_message(3, request_id)
         request_context.add_message(4, client_context)
+        
+        # 4. Image Data
         image_payload = ProtoWriter()
         image_payload.add_bytes(1, image_bytes)
+        
         image_metadata = ProtoWriter()
         image_metadata.add_varint(1, width)
         image_metadata.add_varint(2, height)
+        
         image_data = ProtoWriter()
         image_data.add_message(1, image_payload)
         image_data.add_message(3, image_metadata) 
+        
+        # 5. Payload
+        # We tell the server this is a PDF request (RequestType = 1)
+        payload = ProtoWriter()
+        payload.add_varint(6, 1) # field 6 is request_type, 1 is REQUEST_TYPE_PDF
+        payload.add_string(4, "application/pdf") # field 4 is content_type
+        payload.add_string(5, "file:///document.pdf")
+        
+        # 6. Final Objects Request
         objects_request = ProtoWriter()
         objects_request.add_message(1, request_context)
         objects_request.add_message(3, image_data)
+        objects_request.add_message(4, payload) # Add the payload here
+        
         server_request = ProtoWriter()
         server_request.add_message(1, objects_request)
+        
         return server_request.get_bytes()
 
     def _send_proto_request(self, proto_bytes):
