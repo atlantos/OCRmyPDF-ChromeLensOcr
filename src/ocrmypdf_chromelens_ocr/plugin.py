@@ -6,6 +6,7 @@ import re
 import struct
 import time
 import unicodedata
+import uuid
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -40,6 +41,11 @@ unicodedata.normalize = _patched_normalize
 LENS_PROTO_ENDPOINT = 'https://lensfrontend-pa.googleapis.com/v1/crupload'
 LENS_API_KEY = 'AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY'
 LENS_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
+
+
+def _next_request_uuid() -> int:
+    # Lens request_id.uuid is uint64, so truncate UUIDv4 to 64 bits.
+    return uuid.uuid4().int & ((1 << 64) - 1)
 
 # --- Utilities ---
 def xml_sanitize(text):
@@ -314,11 +320,9 @@ class ChromeLensEngine(OcrEngine):
         return paragraphs
 
     def _create_lens_proto_request(self, image_bytes, width, height):
-        timestamp = int(time.time() * 1000)
-        
         # 1. Request ID
         request_id = ProtoWriter()
-        request_id.add_varint(1, timestamp)
+        request_id.add_varint(1, _next_request_uuid())
         request_id.add_varint(2, 1) 
         
         # 2. Client Context
@@ -554,6 +558,19 @@ class ChromeLensEngine(OcrEngine):
                 paragraphs.append(para_struct)
         return paragraphs
 
+    def _line_title(self, line):
+        bbox = line.get('bbox') or [0, 0, 0, 0]
+        title = bbox_str(bbox)
+        rotation = line.get('rotation')
+        if rotation is None:
+            return title
+
+        # hOCR textangle is in degrees, counter-clockwise from horizontal.
+        degrees = ((math.degrees(rotation) + 180.0) % 360.0) - 180.0
+        if abs(degrees) < 0.1:
+            return title
+        return f"{title}; textangle {degrees:.2f}"
+
     def _write_output_hierarchical(self, paragraphs, img_w, img_h, dpi, input_file, output_hocr, output_text):
         html = ET.Element("html", {"xmlns": "http://www.w3.org/1999/xhtml", "xml:lang": "und"})
         head = ET.SubElement(html, "head")
@@ -582,7 +599,7 @@ class ChromeLensEngine(OcrEngine):
             par_p = ET.SubElement(carea_div, "p", {"class": "ocr_par", "id": f"par_{i+1}", "title": bbox_str(para['bbox'])})
 
             for j, line in enumerate(para['lines']):
-                line_span = ET.SubElement(par_p, "span", {"class": "ocr_line", "id": f"line_{i+1}_{j+1}", "title": bbox_str(line['bbox'])})
+                line_span = ET.SubElement(par_p, "span", {"class": "ocr_line", "id": f"line_{i+1}_{j+1}", "title": self._line_title(line)})
                 line_text = []
                 for k, word in enumerate(line['words']):
                     if not word['text']: continue
