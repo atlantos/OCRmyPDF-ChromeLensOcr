@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import math
 import random
@@ -184,6 +185,12 @@ def add_options(parser):
         help="Maximum length of a word part to allow de-hyphenation (default: 10). "
              "If both parts are longer than this, they are assumed to be separate words/names."
     )
+    group.add_argument(
+        "--chromelens-dump-debug",
+        action="store_true",
+        help="Dump Chrome Lens request/response and parsed layout JSON next to *_ocr_hocr files "
+             "(for debugging and cross-version comparison). Requires --keep-temporary-files.",
+    )
 
 class ChromeLensEngine(OcrEngine):
     @staticmethod
@@ -220,6 +227,12 @@ class ChromeLensEngine(OcrEngine):
         width, height = 0, 0
         dpi = (300, 300)
         final_w, final_h = 0, 0
+        dump_debug_requested = bool(getattr(options, "chromelens_dump_debug", False)) if options is not None else False
+        keep_temporary_files = bool(getattr(options, "keep_temporary_files", False)) if options is not None else False
+        if dump_debug_requested and not keep_temporary_files and not getattr(self, "_dump_debug_warning_logged", False):
+            logger.warning("Ignoring --chromelens-dump-debug because --keep-temporary-files is not enabled.")
+            self._dump_debug_warning_logged = True
+        dump_debug = dump_debug_requested and keep_temporary_files
 
         try:
             with Image.open(input_file) as img:
@@ -262,6 +275,16 @@ class ChromeLensEngine(OcrEngine):
                 upload_w=final_w,
                 upload_h=final_h,
             )
+            if dump_debug:
+                self._dump_debug_artifacts(
+                    output_hocr=output_hocr,
+                    request_proto=proto_payload,
+                    response_proto=response_data,
+                    layout_structure=layout_structure,
+                    orig_size=(width, height),
+                    upload_size=(final_w, final_h),
+                    dpi=dpi,
+                )
             
             # --- De-hyphenation Configuration ---
             no_dehyphen = getattr(options, 'chromelens_no_dehyphenation', False)
@@ -277,6 +300,53 @@ class ChromeLensEngine(OcrEngine):
             raise OcrEngineError(f"Google Lens logic failed: {e}")
 
         self._write_output_hierarchical(layout_structure, width, height, dpi, input_file, output_hocr, output_text)
+
+    def _dump_debug_artifacts(
+        self,
+        output_hocr: Path,
+        request_proto: bytes,
+        response_proto: bytes,
+        layout_structure,
+        orig_size,
+        upload_size,
+        dpi,
+    ):
+        base = output_hocr.with_suffix('')
+        request_path = base.with_name(base.name + "_chromelens_request.pb")
+        response_path = base.with_name(base.name + "_chromelens_response.pb")
+        layout_path = base.with_name(base.name + "_chromelens_layout.json")
+        meta_path = base.with_name(base.name + "_chromelens_meta.json")
+
+        try:
+            request_path.write_bytes(request_proto)
+            response_path.write_bytes(response_proto)
+            layout_payload = {
+                "paragraphs": layout_structure,
+            }
+            layout_path.write_text(
+                json.dumps(layout_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            meta_payload = {
+                "orig_size": {"width": int(orig_size[0]), "height": int(orig_size[1])},
+                "upload_size": {"width": int(upload_size[0]), "height": int(upload_size[1])},
+                "dpi": list(dpi) if isinstance(dpi, (tuple, list)) else dpi,
+                "request_bytes": len(request_proto),
+                "response_bytes": len(response_proto),
+            }
+            meta_path.write_text(
+                json.dumps(meta_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            logger.info(
+                "ChromeLens debug dump written: %s, %s, %s, %s",
+                request_path,
+                response_path,
+                layout_path,
+                meta_path,
+            )
+        except Exception as e:
+            logger.warning("Failed to write ChromeLens debug dump files: %s", e)
 
     def _sort_lines_by_rotation(self, paragraphs):
         for para in paragraphs:
