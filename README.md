@@ -1,75 +1,91 @@
 # OCRmyPDF-ChromeLens-Ocr
 
-A plugin for [OCRmyPDF](https://github.com/ocrmypdf/OCRmyPDF) that uses the **Google Lens API** to perform Optical Character Recognition (OCR). 
+OCRmyPDF plugin that uses Google Lens (`v1/crupload`) as OCR backend.
 
-## Features
+## What It Does
 
--   **High Accuracy**: Leverages Google's advanced Lens models.
--   **Structure Preservation**: Correctly handles multi-column layouts and vertical text flows via strict API parsing and rotation-aware sorting.
--   **Smart De-hyphenation**: Merges words broken across lines while respecting punctuation dashes.
-
-***
+- Sends rasterized page images to Google Lens and parses protobuf response into hOCR + text.
+- Preserves hierarchical layout (paragraphs/lines/words), including rotation metadata (`textangle` in hOCR lines).
+- Handles word separators from Lens response for better spacing fidelity.
+- Includes optional de-hyphenation for line-broken words.
+- Tries to preserve superscript glyphs (for example `¹²³`) by overriding OCRmyPDF's NFKC normalization path.
 
 ## Installation
 
-### Prerequisites
-You must have `ocrmypdf` installed.
+Prerequisite: install `ocrmypdf`.
 
-### Install from Git
+Install from Git:
+
 ```bash
 pip install git+https://github.com/atlantos/OCRmyPDF-ChromeLens-Ocr.git
 ```
 
-### Install from Pip
+Install from PyPI:
+
 ```bash
 pip install ocrmypdf-chromelens-ocr
 ```
 
 ## Usage
 
-To use this engine, pass the plugin name to OCRmyPDF. You generally do not need to specify a language, as Google Lens auto-detects it.
+Basic usage:
 
 ```bash
 ocrmypdf --plugin ocrmypdf_chromelens_ocr input.pdf output.pdf
 ```
 
-### Configuration Options
+Debug dump example:
 
-You can configure the behavior of the plugin using the following command-line arguments:
+```bash
+ocrmypdf \
+  --plugin ocrmypdf_chromelens_ocr \
+  --keep-temporary-files \
+  --chromelens-dump-debug \
+  input.pdf output.pdf
+```
 
-| Argument | Description | Default |
+## Plugin CLI Options
+
+| Option | Description | Default |
 | :--- | :--- | :--- |
-| `--chromelens-no-dehyphenation` | Disables the logic that merges hyphenated words across lines. Useful if you prefer raw output. | Disabled |
-| `--chromelens-max-dehyphen-len` | The **maximum** length of word parts allowed for de-hyphenation. If both the prefix (before hyphen) and suffix (after hyphen) are *longer* than this value, the plugin assumes it is a compound word or dash separator and will *not* merge them. | 10 |
+| `--chromelens-no-dehyphenation` | Disable de-hyphenation across adjacent lines. | `false` |
+| `--chromelens-max-dehyphen-len` | Max prefix/suffix length threshold for de-hyphenation merge. | `10` |
+| `--chromelens-dump-debug` | Write raw request/response + parsed layout artifacts next to `*_ocr_hocr.*` temp files. Works only with `--keep-temporary-files`. | `false` |
 
-**Example: Disable de-hyphenation**
-```bash
-ocrmypdf --plugin ocrmypdf_chromelens_ocr --chromelens-no-dehyphenation input.pdf output.pdf
-```
+## Current Implementation Defaults
 
-**Example: Stricter de-hyphenation (only merge very short breaks)**
-```bash
-ocrmypdf --plugin ocrmypdf_chromelens_ocr --chromelens-max-dehyphen-len 4 input.pdf output.pdf
-```
+These are hardcoded in `src/ocrmypdf_chromelens_ocr/plugin.py`:
 
-## Credits & Acknowledgements
+- Upload format: `JPEG`
+- JPEG quality: `95`
+- Max upload long edge:
+  - OCRmyPDF v16: `1600`
+  - OCRmyPDF v17+: `1200`
+- Fixed request locale/context:
+  - language `en`, region `US`, timezone `America/New_York`
+- Chrome-style request headers:
+  - `x-browser-channel`, `x-browser-year`, `x-browser-copyright`, `x-browser-validation`
 
-This project is a Python port and adaptation based on ideas and logic from:
+Note: OCRmyPDF language flags (`-l/--language`) are not propagated to Lens request context; Lens auto-detection is relied on.
 
-1.  **[chrome-lens-ocr](https://github.com/dimdenGD/chrome-lens-ocr)**:
-    -   Provided the critical reverse-engineering of the Google Lens Protobuf API (`v1/crupload`).
-    -   Logic for strict layout parsing and request structure.
+## Compatibility
 
-2.  **[OCRmyPDF-AppleOCR](https://github.com/mkyt/OCRmyPDF-AppleOCR)**:
-    -   Provided the architectural inspiration for creating an OCRmyPDF plugin that offloads recognition to an external engine.
+- Python `>=3.9`
+- OCRmyPDF `>=16.0.0`
+- Tested with OCRmyPDF 16 and 17 code paths
 
-## Disclaimer
+## Limitations
 
-This software is for educational purposes. It uses an undocumented private API from Google. 
--   **Privacy**: Your images are uploaded to Google servers. Do not process sensitive/confidential data.
--   **Stability**: The API may change or break at any time without notice.
--   **Rate Limits**: Excessive use may result in your IP being temporarily blocked by Google.
+- Uses undocumented/private Google API and may break without notice.
+- Requires network access and uploads page images to Google servers.
+- OCR quality depends on Lens behavior and can vary by document type.
+- `generate_pdf()` in the plugin is not implemented; OCR output is produced through hOCR/text path.
+
+## Credits
+
+- [chrome-lens-ocr](https://github.com/dimdenGD/chrome-lens-ocr) for protobuf/API reverse-engineering ideas.
+- [OCRmyPDF-AppleOCR](https://github.com/mkyt/OCRmyPDF-AppleOCR) for plugin architecture inspiration.
 
 ## License
 
-MIT License
+MIT
