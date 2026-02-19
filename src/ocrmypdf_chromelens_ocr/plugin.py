@@ -46,6 +46,13 @@ def _apply_nfkc_patch():
     unicodedata.normalize = _patched_normalize
     _nfkc_patch_applied = True
 
+def _remove_nfkc_patch():
+    global _nfkc_patch_applied
+    if not _nfkc_patch_applied:
+        return
+    unicodedata.normalize = _original_normalize
+    _nfkc_patch_applied = False
+
 # --- Constants ---
 LENS_PROTO_ENDPOINT = 'https://lensfrontend-pa.googleapis.com/v1/crupload'
 LENS_API_KEY = 'AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY'
@@ -698,7 +705,7 @@ class ChromeLensEngine(OcrEngine):
                     if 2 not in word: continue
                     try:
                         text_val = word[2][0].decode('utf-8')
-                    except: continue
+                    except Exception: continue
                     text_val = xml_sanitize(text_val)
                     if not text_val.strip(): continue
                     sep_val = None
@@ -706,7 +713,7 @@ class ChromeLensEngine(OcrEngine):
                         try:
                             sep_val = word[3][0].decode('utf-8')
                             sep_val = xml_sanitize(sep_val)
-                        except:
+                        except Exception:
                             sep_val = None
                     word_bbox = None
                     if 4 in word:
@@ -877,6 +884,7 @@ if _is_ocrmypdf_v17_or_newer():
             ocr_engine = getattr(options, "ocr_engine", "auto")
             # If the user explicitly requested another engine, do not return this one
             if ocr_engine not in ("auto", "chromelens"):
+                _remove_nfkc_patch()
                 return None
         _apply_nfkc_patch()
         return ChromeLensEngine()

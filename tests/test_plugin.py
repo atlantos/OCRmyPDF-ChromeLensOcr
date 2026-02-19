@@ -57,6 +57,15 @@ def test_nfkc_patch_preserves_superscripts(plugin):
         assert plugin._patched_normalize("NFC", "x¹") == plugin._original_normalize("NFC", "x¹")
         plugin._apply_nfkc_patch()
         assert unicodedata.normalize("NFKC", "x¹") == "x¹"
+
+        # _remove_nfkc_patch restores original behaviour
+        plugin._remove_nfkc_patch()
+        assert unicodedata.normalize("NFKC", "x¹") == plugin._original_normalize("NFKC", "x¹")
+        assert plugin._nfkc_patch_applied is False
+
+        # Calling remove again when already removed is a no-op
+        plugin._remove_nfkc_patch()
+        assert plugin._nfkc_patch_applied is False
     finally:
         unicodedata.normalize = original
         plugin._nfkc_patch_applied = False
@@ -721,7 +730,13 @@ def test_get_ocr_engine_v17_selection(plugin):
         assert plugin.get_ocr_engine(SimpleNamespace(ocr_engine="tesseract")) is None
         assert isinstance(plugin.get_ocr_engine(SimpleNamespace(ocr_engine="auto")), plugin.ChromeLensEngine)
         assert isinstance(plugin.get_ocr_engine(SimpleNamespace(ocr_engine="chromelens")), plugin.ChromeLensEngine)
+        # Patch should be active after selecting chromelens
         assert unicodedata.normalize("NFKC", "x¹") == "x¹"
+
+        # Selecting another engine must reverse the patch
+        assert plugin.get_ocr_engine(SimpleNamespace(ocr_engine="tesseract")) is None
+        assert plugin._nfkc_patch_applied is False
+        assert unicodedata.normalize("NFKC", "x¹") == plugin._original_normalize("NFKC", "x¹")
     finally:
         unicodedata.normalize = original
         plugin._nfkc_patch_applied = False

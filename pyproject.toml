@@ -26,6 +26,7 @@ dependencies = [
     "ocrmypdf>=16.0.0",
     "requests",
     "Pillow",
+    "packaging",
 ]
 
 [project.optional-dependencies]
