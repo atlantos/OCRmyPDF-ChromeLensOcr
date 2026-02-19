@@ -8,6 +8,8 @@ import struct
 import time
 import unicodedata
 import uuid
+import base64
+import hashlib
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -48,6 +50,28 @@ def _apply_nfkc_patch():
 LENS_PROTO_ENDPOINT = 'https://lensfrontend-pa.googleapis.com/v1/crupload'
 LENS_API_KEY = 'AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY'
 LENS_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
+LENS_ACCEPT_LANGUAGE = 'en-US,en;q=0.9'
+LENS_LOCALE_LANGUAGE = 'en'
+LENS_LOCALE_REGION = 'US'
+LENS_LOCALE_TIMEZONE = 'America/New_York'
+LENS_CLIENT_PLATFORM = 6  # PLATFORM_LENS_OVERLAY
+LENS_CLIENT_SURFACE = 4   # SURFACE_CHROMIUM
+LENS_PAYLOAD_REQUEST_TYPE = 1  # REQUEST_TYPE_PDF
+LENS_PAYLOAD_CONTENT_TYPE = "application/pdf"
+LENS_PAYLOAD_PAGE_URL = "file:///document.pdf"
+LENS_BROWSER_CHANNEL = "stable"
+
+# Empirically best defaults from side-by-side benchmark on test corpus.
+UPLOAD_FORMAT = "JPEG"
+UPLOAD_JPEG_QUALITY = 95
+MAX_DIMENSION_V16 = 1600
+MAX_DIMENSION_V17 = 1200
+
+LENS_PLATFORM_API_KEYS = {
+    "windows": "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
+    "linux": "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
+    "macos": "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
+}
 
 
 def _next_request_uuid() -> int:
@@ -64,6 +88,35 @@ def _is_ocrmypdf_v17_or_newer() -> bool:
         parts = re.findall(r"\d+", raw_version)
         major = int(parts[0]) if parts else 0
         return major >= 17
+
+
+def _platform_api_key_from_user_agent(user_agent: str) -> str:
+    ua = user_agent.lower()
+    if "windows" in ua:
+        return LENS_PLATFORM_API_KEYS["windows"]
+    if "linux" in ua:
+        return LENS_PLATFORM_API_KEYS["linux"]
+    if "macintosh" in ua or "mac os x" in ua:
+        return LENS_PLATFORM_API_KEYS["macos"]
+    raise OcrEngineError("Unable to determine platform API key from user agent")
+
+
+def _generate_x_browser_validation(user_agent: str) -> str:
+    # Mirrors Chrome's header generation: base64(sha1(api_key + user_agent))
+    api_key = _platform_api_key_from_user_agent(user_agent)
+    digest = hashlib.sha1((api_key + user_agent).encode("utf-8")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def _chrome_year_from_user_agent(user_agent: str) -> int:
+    # Chrome milestone cadence is monthly. Anchor: M109 started in 2023.
+    match = re.search(r"Chrome/(\d+)", user_agent)
+    if not match:
+        return time.gmtime().tm_year
+    major = int(match.group(1))
+    if major < 109:
+        return time.gmtime().tm_year
+    return 2023 + ((major - 109) // 12)
 
 # --- Utilities ---
 def xml_sanitize(text):
@@ -195,7 +248,7 @@ def add_options(parser):
 class ChromeLensEngine(OcrEngine):
     @staticmethod
     def version():
-        return "1.0.4"
+        return "1.0.5"
 
     @classmethod
     def creator_tag(cls, options=None):
@@ -238,7 +291,7 @@ class ChromeLensEngine(OcrEngine):
             with Image.open(input_file) as img:
                 width, height = img.size
                 dpi = img.info.get('dpi', (300, 300))
-                MAX_DIMENSION = 4800
+                max_dimension = MAX_DIMENSION_V17 if _is_ocrmypdf_v17_or_newer() else MAX_DIMENSION_V16
                 process_img = img
 
                 # Pillow's .convert('RGB') turns transparent pixels BLACK.
@@ -251,15 +304,37 @@ class ChromeLensEngine(OcrEngine):
                 elif process_img.mode != 'RGB':
                     process_img = process_img.convert('RGB')
 
-                if max(width, height) > MAX_DIMENSION:
-                    scale = MAX_DIMENSION / max(width, height)
-                    new_w = int(width * scale)
-                    new_h = int(height * scale)
-                    logger.debug(f"Downscaling from {width}x{height} to {new_w}x{new_h}")
+                long_edge = max(width, height)
+                scale = 1.0
+                resize_reason = None
+                if long_edge > max_dimension:
+                    scale = max_dimension / long_edge
+                    resize_reason = "downscaling"
+
+                if scale != 1.0:
+                    new_w = max(1, int(round(width * scale)))
+                    new_h = max(1, int(round(height * scale)))
+                    logger.debug(
+                        "%s from %sx%s to %sx%s",
+                        resize_reason or "resizing",
+                        width,
+                        height,
+                        new_w,
+                        new_h,
+                    )
                     process_img = process_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
                 buffer = io.BytesIO()
-                process_img.save(buffer, format="PNG")
+                if UPLOAD_FORMAT == "JPEG":
+                    process_img.save(
+                        buffer,
+                        format="JPEG",
+                        quality=UPLOAD_JPEG_QUALITY,
+                        optimize=False,
+                        subsampling=0,
+                    )
+                else:
+                    process_img.save(buffer, format="PNG")
                 img_bytes = buffer.getvalue()
                 final_w, final_h = process_img.size
         except Exception as e:
@@ -425,15 +500,14 @@ class ChromeLensEngine(OcrEngine):
         
         # 2. Client Context
         locale_context = ProtoWriter()
-        locale_context.add_string(1, 'en') 
-        locale_context.add_string(2, 'US') 
-        locale_context.add_string(3, 'America/New_York') 
+        locale_context.add_string(1, LENS_LOCALE_LANGUAGE)
+        locale_context.add_string(2, LENS_LOCALE_REGION)
+        locale_context.add_string(3, LENS_LOCALE_TIMEZONE)
         
         client_context = ProtoWriter()
-        client_context.add_varint(1, 6) 
-        client_context.add_varint(2, 4) 
+        client_context.add_varint(1, LENS_CLIENT_PLATFORM)
+        client_context.add_varint(2, LENS_CLIENT_SURFACE)
         client_context.add_message(4, locale_context)
-        # Note: We aren't adding filters here, PDF mode usually implies full text
         
         # 3. Request Context
         request_context = ProtoWriter()
@@ -452,18 +526,15 @@ class ChromeLensEngine(OcrEngine):
         image_data.add_message(1, image_payload)
         image_data.add_message(3, image_metadata) 
         
-        # 5. Payload
-        # We tell the server this is a PDF request (RequestType = 1)
-        payload = ProtoWriter()
-        payload.add_varint(6, 1) # field 6 is request_type, 1 is REQUEST_TYPE_PDF
-        payload.add_string(4, "application/pdf") # field 4 is content_type
-        payload.add_string(5, "file:///document.pdf")
-        
         # 6. Final Objects Request
         objects_request = ProtoWriter()
         objects_request.add_message(1, request_context)
         objects_request.add_message(3, image_data)
-        objects_request.add_message(4, payload) # Add the payload here
+        payload = ProtoWriter()
+        payload.add_varint(6, LENS_PAYLOAD_REQUEST_TYPE)
+        payload.add_string(4, LENS_PAYLOAD_CONTENT_TYPE)
+        payload.add_string(5, LENS_PAYLOAD_PAGE_URL)
+        objects_request.add_message(4, payload)
         
         server_request = ProtoWriter()
         server_request.add_message(1, objects_request)
@@ -471,13 +542,19 @@ class ChromeLensEngine(OcrEngine):
         return server_request.get_bytes()
 
     def _send_proto_request(self, proto_bytes):
+        browser_year = _chrome_year_from_user_agent(LENS_USER_AGENT)
+        browser_validation = _generate_x_browser_validation(LENS_USER_AGENT)
         headers = {
             'Content-Type': 'application/x-protobuf',
             'X-Goog-Api-Key': LENS_API_KEY,
             'User-Agent': LENS_USER_AGENT,
             'Accept': '*/*',
             'Accept-Encoding': 'gzip, deflate, br',
-            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Language': LENS_ACCEPT_LANGUAGE,
+            'x-browser-channel': LENS_BROWSER_CHANNEL,
+            'x-browser-year': str(browser_year),
+            'x-browser-copyright': f'Copyright {browser_year} Google LLC. All rights reserved.',
+            'x-browser-validation': browser_validation,
         }
         
         max_retries = 3

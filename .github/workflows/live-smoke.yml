@@ -1,0 +1,80 @@
+name: Live Smoke OCR
+
+on:
+  push:
+    branches:
+      - testing
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-ocr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ocrmypdf-version: ["16.13.0", "17.2.0"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghostscript tesseract-ocr qpdf
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Do not install this package here: we load plugin explicitly via --plugin path below.
+          # Installing -e . would register the entry point too and load plugin twice.
+          python -m pip install "ocrmypdf==${{ matrix.ocrmypdf-version }}" requests Pillow packaging
+
+      - name: Run live OCR smoke
+        run: |
+          mkdir -p live_out
+          ocrmypdf \
+            --plugin src/ocrmypdf_chromelens_ocr/plugin.py \
+            --output-type pdf \
+            --optimize 0 \
+            --force-ocr \
+            --fast-web-view 1 \
+            --continue-on-soft-render-error \
+            --jobs 1 \
+            --sidecar "live_out/sidecar_${{ matrix.ocrmypdf-version }}.txt" \
+            tests/assets/testfile.pdf \
+            "live_out/out_${{ matrix.ocrmypdf-version }}.pdf"
+
+      - name: Validate outputs
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          version = "${{ matrix.ocrmypdf-version }}"
+          sidecar = Path(f"live_out/sidecar_{version}.txt")
+          pdf = Path(f"live_out/out_{version}.pdf")
+          assert pdf.exists() and pdf.stat().st_size > 0, f"Missing/empty PDF for {version}"
+          assert sidecar.exists() and sidecar.stat().st_size > 0, f"Missing/empty sidecar for {version}"
+          text = sidecar.read_text(encoding="utf-8", errors="ignore")
+          non_ws = "".join(ch for ch in text if not ch.isspace())
+          assert len(non_ws) >= 100, f"OCR text too short for {version}: {len(non_ws)}"
+          print(f"{version}: output checks passed")
+          PY
+
+      - name: Compare sidecar to reference text
+        run: |
+          python tests/scripts/compare_ocr_texts.py \
+            --reference tests/assets/testfile_ocr.txt \
+            --candidate "live_out/sidecar_${{ matrix.ocrmypdf-version }}.txt" \
+            --json-out "live_out/similarity_${{ matrix.ocrmypdf-version }}.json" \
+            --min-char-ratio 0.70 \
+            --min-token-f1 0.88

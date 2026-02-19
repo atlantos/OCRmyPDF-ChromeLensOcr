@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . --no-deps
+          python -m pip install pytest pytest-cov requests Pillow packaging
+
+      - name: Run unit tests
+        run: python -m pytest -q --cov=src/ocrmypdf_chromelens_ocr --cov-report=term-missing --cov-fail-under=90
+
+      - name: Verify plugin syntax
+        run: python -m py_compile src/ocrmypdf_chromelens_ocr/plugin.py
+
+  ocrmypdf-compat:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ocrmypdf-version: ["16.13.0", "17.2.0"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies for compatibility tests
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . --no-deps
+          python -m pip install "ocrmypdf==${{ matrix.ocrmypdf-version }}" pytest requests Pillow packaging
+
+      - name: Run compatibility tests
+        run: python -m pytest -q tests/test_compat_real_ocrmypdf.py
