@@ -36,8 +36,9 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # Do not install this package here: we load plugin explicitly via --plugin path below.
-          # Installing -e . would register the entry point too and load plugin twice.
+          # Enforce single plugin loading mode for this workflow: path-based only.
+          # If this package is installed, OCRmyPDF could also discover the entry point and register hooks twice.
+          python -m pip uninstall -y ocrmypdf-chromelens-ocr || true
           python -m pip install "ocrmypdf==${{ matrix.ocrmypdf-version }}" requests Pillow packaging
 
       - name: Run live OCR smoke
