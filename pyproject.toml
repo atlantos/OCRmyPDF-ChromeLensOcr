@@ -39,8 +39,14 @@ test = [
 "Homepage" = "https://github.com/atlantos/OCRmyPDF-ChromeLens-Ocr"
 "Bug Tracker" = "https://github.com/atlantos/OCRmyPDF-ChromeLens-Ocr/issues"
 
-[project.entry-points."ocrmypdf"]
-chromelens = "ocrmypdf_chromelens_ocr"
+# NOTE: Auto-registration with OCRmyPDF is intentionally disabled.
+# If enabled, OCRmyPDF discovers this plugin automatically via setuptools entry points
+# and may select ChromeLens under `--ocr-engine auto`.
+# That can send document content to Google Lens servers implicitly after package install.
+# Keep this disabled so network OCR is explicit opt-in via `--plugin ...`.
+#
+# [project.entry-points."ocrmypdf"]
+# chromelens = "ocrmypdf_chromelens_ocr"
 
 [tool.setuptools.dynamic]
 version = {attr = "ocrmypdf_chromelens_ocr.plugin.__version__"}
