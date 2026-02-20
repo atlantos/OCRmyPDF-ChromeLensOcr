@@ -5,6 +5,7 @@ import math
 import random
 import re
 import struct
+import sys
 import time
 import unicodedata
 import uuid
@@ -16,6 +17,8 @@ from xml.etree import ElementTree as ET
 import requests
 from PIL import Image
 from packaging.version import InvalidVersion, Version
+
+__version__ = "1.0.6"
 
 # ocrmypdf imports
 import ocrmypdf
@@ -46,10 +49,15 @@ def _apply_nfkc_patch():
     unicodedata.normalize = _patched_normalize
     _nfkc_patch_applied = True
 
+def _remove_nfkc_patch():
+    global _nfkc_patch_applied
+    if not _nfkc_patch_applied:
+        return
+    unicodedata.normalize = _original_normalize
+    _nfkc_patch_applied = False
+
 # --- Constants ---
 LENS_PROTO_ENDPOINT = 'https://lensfrontend-pa.googleapis.com/v1/crupload'
-LENS_API_KEY = 'AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY'
-LENS_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
 LENS_ACCEPT_LANGUAGE = 'en-US,en;q=0.9'
 LENS_LOCALE_LANGUAGE = 'en'
 LENS_LOCALE_REGION = 'US'
@@ -66,11 +74,36 @@ UPLOAD_FORMAT = "JPEG"
 UPLOAD_JPEG_QUALITY = 95
 MAX_DIMENSION_V16 = 1600
 MAX_DIMENSION_V17 = 1200
+INITIAL_REQUEST_JITTER_MAX_SEC = 0.35
 
-LENS_PLATFORM_API_KEYS = {
-    "windows": "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
-    "linux": "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
-    "macos": "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
+LENS_PLATFORM_PROFILES = {
+    "windows": {
+        "api_key": "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+        ),
+        "sec_ch_ua_platform": "Windows",
+        "browser_year": 2025,
+    },
+    "linux": {
+        "api_key": "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
+        "user_agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+        ),
+        "sec_ch_ua_platform": "Linux",
+        "browser_year": 2025,
+    },
+    "macos": {
+        "api_key": "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
+        "user_agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+        ),
+        "sec_ch_ua_platform": "macOS",
+        "browser_year": 2025,
+    },
 }
 
 
@@ -90,33 +123,55 @@ def _is_ocrmypdf_v17_or_newer() -> bool:
         return major >= 17
 
 
-def _platform_api_key_from_user_agent(user_agent: str) -> str:
-    ua = user_agent.lower()
-    if "windows" in ua:
-        return LENS_PLATFORM_API_KEYS["windows"]
-    if "linux" in ua:
-        return LENS_PLATFORM_API_KEYS["linux"]
-    if "macintosh" in ua or "mac os x" in ua:
-        return LENS_PLATFORM_API_KEYS["macos"]
-    raise OcrEngineError("Unable to determine platform API key from user agent")
+def _runtime_lens_platform() -> str:
+    platform = sys.platform
+    if platform.startswith("win"):
+        return "windows"
+    if platform.startswith("linux"):
+        return "linux"
+    if platform == "darwin":
+        return "macos"
+
+    logger.warning("Unknown platform '%s'; defaulting to macOS Lens profile", platform)
+    return "macos"
 
 
-def _generate_x_browser_validation(user_agent: str) -> str:
+def _lens_request_identity() -> tuple[str, str, int, str]:
+    platform_name = _runtime_lens_platform()
+    profile = LENS_PLATFORM_PROFILES[platform_name]
+    return (
+        profile["api_key"],
+        profile["user_agent"],
+        profile["browser_year"],
+        platform_name,
+    )
+
+
+def _chrome_major_from_user_agent(user_agent: str) -> int:
+    match = re.search(r"Chrome/(\d+)", user_agent)
+    if match:
+        return int(match.group(1))
+    logger.warning("Unable to parse Chrome major version from user agent; defaulting to 144")
+    return 144
+
+
+def _sec_ch_ua_headers(platform_name: str, user_agent: str) -> dict[str, str]:
+    chrome_major = _chrome_major_from_user_agent(user_agent)
+    platform_value = LENS_PLATFORM_PROFILES[platform_name]["sec_ch_ua_platform"]
+    return {
+        "sec-ch-ua": (
+            f'"Not:A-Brand";v="99", "Google Chrome";v="{chrome_major}", "Chromium";v="{chrome_major}"'
+        ),
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": f'"{platform_value}"',
+    }
+
+
+def _generate_x_browser_validation(api_key: str, user_agent: str) -> str:
     # Mirrors Chrome's header generation: base64(sha1(api_key + user_agent))
-    api_key = _platform_api_key_from_user_agent(user_agent)
     digest = hashlib.sha1((api_key + user_agent).encode("utf-8")).digest()
     return base64.b64encode(digest).decode("ascii")
 
-
-def _chrome_year_from_user_agent(user_agent: str) -> int:
-    # Chrome milestone cadence is monthly. Anchor: M109 started in 2023.
-    match = re.search(r"Chrome/(\d+)", user_agent)
-    if not match:
-        return time.gmtime().tm_year
-    major = int(match.group(1))
-    if major < 109:
-        return time.gmtime().tm_year
-    return 2023 + ((major - 109) // 12)
 
 # --- Utilities ---
 def xml_sanitize(text):
@@ -248,16 +303,13 @@ def add_options(parser):
 class ChromeLensEngine(OcrEngine):
     @staticmethod
     def version():
-        return "1.0.5"
+        return __version__
 
     @classmethod
     def creator_tag(cls, options=None):
         return f"OCRmyPDF-ChromeLens-Ocr {cls.version()}"
 
     def __str__(self):
-        return "ChromeLensOcr"
-
-    def engine_name(self):
         return "ChromeLensOcr"
 
     def languages(self, options):
@@ -338,9 +390,15 @@ class ChromeLensEngine(OcrEngine):
                 img_bytes = buffer.getvalue()
                 final_w, final_h = process_img.size
         except Exception as e:
-            raise OcrEngineError(f"Failed to process image: {e}")
+            raise OcrEngineError(f"Failed to process image: {e}") from e
 
         try:
+            # Stagger startup requests to reduce burst collisions.
+            jitter = random.uniform(0.0, INITIAL_REQUEST_JITTER_MAX_SEC)
+            if jitter > 0:
+                logger.debug("Applying initial request jitter of %.3f seconds", jitter)
+                time.sleep(jitter)
+
             proto_payload = self._create_lens_proto_request(img_bytes, final_w, final_h)
             response_data = self._send_proto_request(proto_payload)
             layout_structure = self._strict_parse_hierarchical(
@@ -372,7 +430,7 @@ class ChromeLensEngine(OcrEngine):
             layout_structure = self._sort_lines_by_rotation(layout_structure)
             
         except Exception as e:
-            raise OcrEngineError(f"Google Lens logic failed: {e}")
+            raise OcrEngineError(f"Google Lens logic failed: {e}") from e
 
         self._write_output_hierarchical(layout_structure, width, height, dpi, input_file, output_hocr, output_text)
 
@@ -542,12 +600,12 @@ class ChromeLensEngine(OcrEngine):
         return server_request.get_bytes()
 
     def _send_proto_request(self, proto_bytes):
-        browser_year = _chrome_year_from_user_agent(LENS_USER_AGENT)
-        browser_validation = _generate_x_browser_validation(LENS_USER_AGENT)
+        api_key, user_agent, browser_year, platform_name = _lens_request_identity()
+        browser_validation = _generate_x_browser_validation(api_key, user_agent)
         headers = {
             'Content-Type': 'application/x-protobuf',
-            'X-Goog-Api-Key': LENS_API_KEY,
-            'User-Agent': LENS_USER_AGENT,
+            'X-Goog-Api-Key': api_key,
+            'User-Agent': user_agent,
             'Accept': '*/*',
             'Accept-Encoding': 'gzip, deflate, br',
             'Accept-Language': LENS_ACCEPT_LANGUAGE,
@@ -556,6 +614,7 @@ class ChromeLensEngine(OcrEngine):
             'x-browser-copyright': f'Copyright {browser_year} Google LLC. All rights reserved.',
             'x-browser-validation': browser_validation,
         }
+        headers.update(_sec_ch_ua_headers(platform_name, user_agent))
         
         max_retries = 3
         last_exception = None
@@ -577,17 +636,27 @@ class ChromeLensEngine(OcrEngine):
                 
                 # If non-200, log and allow retry
                 error_msg = f"Server returned {response.status_code}. Response: {response.text[:200]}"
-                logger.warning(f"ChromeLens API attempt {attempt+1}/{max_retries} failed: {error_msg}")
+                logger.warning(
+                    "ChromeLens API attempt %d/%d failed: %s",
+                    attempt + 1,
+                    max_retries,
+                    error_msg,
+                )
                 last_exception = OcrEngineError(error_msg)
 
             except (requests.RequestException, OcrEngineError) as e:
-                logger.warning(f"ChromeLens API connection failed (Attempt {attempt+1}/{max_retries}): {e}")
+                logger.warning(
+                    "ChromeLens API connection failed (Attempt %d/%d): %s",
+                    attempt + 1,
+                    max_retries,
+                    e,
+                )
                 last_exception = OcrEngineError(f"Network error: {e}")
 
             # Backoff logic if we haven't succeeded yet
             if attempt < max_retries - 1:
                 sleep_time = random.uniform(4.0, 10.0)
-                logger.info(f"Retrying in {sleep_time:.1f} seconds...")
+                logger.info("Retrying in %.1f seconds...", sleep_time)
                 time.sleep(sleep_time)
 
         # If loop finishes without success
@@ -698,7 +767,7 @@ class ChromeLensEngine(OcrEngine):
                     if 2 not in word: continue
                     try:
                         text_val = word[2][0].decode('utf-8')
-                    except: continue
+                    except Exception: continue
                     text_val = xml_sanitize(text_val)
                     if not text_val.strip(): continue
                     sep_val = None
@@ -706,7 +775,7 @@ class ChromeLensEngine(OcrEngine):
                         try:
                             sep_val = word[3][0].decode('utf-8')
                             sep_val = xml_sanitize(sep_val)
-                        except:
+                        except Exception:
                             sep_val = None
                     word_bbox = None
                     if 4 in word:
@@ -867,7 +936,7 @@ class ChromeLensEngine(OcrEngine):
             with open(output_text, "w", encoding="utf-8") as f:
                 f.write("\n".join(full_text_lines).strip())
 
-    def generate_pdf(self, input_file: Path, output_pdf: Path, hocr_file: Path, recalculate_coords: bool = False, options=None):
+    def generate_pdf(self, input_file: Path, output_pdf: Path, output_text: Path, options=None):
         raise NotImplementedError()
 
 if _is_ocrmypdf_v17_or_newer():
@@ -877,6 +946,7 @@ if _is_ocrmypdf_v17_or_newer():
             ocr_engine = getattr(options, "ocr_engine", "auto")
             # If the user explicitly requested another engine, do not return this one
             if ocr_engine not in ("auto", "chromelens"):
+                _remove_nfkc_patch()
                 return None
         _apply_nfkc_patch()
         return ChromeLensEngine()

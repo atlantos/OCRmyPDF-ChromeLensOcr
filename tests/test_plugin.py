@@ -2,7 +2,6 @@ import argparse
 import json
 import math
 import struct
-import time
 import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,6 +56,15 @@ def test_nfkc_patch_preserves_superscripts(plugin):
         assert plugin._patched_normalize("NFC", "x¹") == plugin._original_normalize("NFC", "x¹")
         plugin._apply_nfkc_patch()
         assert unicodedata.normalize("NFKC", "x¹") == "x¹"
+
+        # _remove_nfkc_patch restores original behaviour
+        plugin._remove_nfkc_patch()
+        assert unicodedata.normalize("NFKC", "x¹") == plugin._original_normalize("NFKC", "x¹")
+        assert plugin._nfkc_patch_applied is False
+
+        # Calling remove again when already removed is a no-op
+        plugin._remove_nfkc_patch()
+        assert plugin._nfkc_patch_applied is False
     finally:
         unicodedata.normalize = original
         plugin._nfkc_patch_applied = False
@@ -76,46 +84,48 @@ def test_is_ocrmypdf_v17_invalid_version_fallback(plugin, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("user_agent", "expected_key"),
+    ("sys_platform", "profile"),
     [
-        (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
-        ),
-        (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
-        ),
-        (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
-        ),
+        ("win32", "windows"),
+        ("linux", "linux"),
+        ("darwin", "macos"),
     ],
 )
-def test_platform_api_key_from_user_agent(plugin, user_agent, expected_key):
-    assert plugin._platform_api_key_from_user_agent(user_agent) == expected_key
-
-
-def test_platform_api_key_from_user_agent_raises_on_unknown_os(plugin):
-    with pytest.raises(plugin.OcrEngineError):
-        plugin._platform_api_key_from_user_agent("CustomAgent/1.0")
-
-
-def test_generate_x_browser_validation_matches_reference_value(plugin):
+def test_runtime_lens_platform_and_identity(plugin, monkeypatch, sys_platform, profile):
+    monkeypatch.setattr(plugin.sys, "platform", sys_platform)
+    assert plugin._runtime_lens_platform() == profile
+    api_key, user_agent, browser_year, platform_name = plugin._lens_request_identity()
+    assert platform_name == profile
+    assert api_key == plugin.LENS_PLATFORM_PROFILES[profile]["api_key"]
+    assert user_agent == plugin.LENS_PLATFORM_PROFILES[profile]["user_agent"]
+    assert browser_year == plugin.LENS_PLATFORM_PROFILES[profile]["browser_year"]
     assert (
-        plugin._generate_x_browser_validation(plugin.LENS_USER_AGENT)
-        == "YX3LzjiV26KLi9dp+0FecwLxpEU="
+        plugin.LENS_PLATFORM_PROFILES[profile]["sec_ch_ua_platform"]
+        in plugin._sec_ch_ua_headers(profile, user_agent)["sec-ch-ua-platform"]
     )
 
 
-def test_chrome_year_from_user_agent(plugin):
-    assert plugin._chrome_year_from_user_agent("Chrome/144.0.0.0") == 2025
-    assert plugin._chrome_year_from_user_agent("Chrome/120.0.0.0") == 2023
-    assert plugin._chrome_year_from_user_agent("Chrome/108.0.0.0") == time.gmtime().tm_year
-    assert plugin._chrome_year_from_user_agent("NoChromeToken/1.0") == time.gmtime().tm_year
+def test_runtime_lens_platform_unknown_fallback(plugin, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setattr(plugin.sys, "platform", "plan9")
+    assert plugin._runtime_lens_platform() == "macos"
+    assert any("defaulting to macOS Lens profile" in rec.message for rec in caplog.records)
+
+
+def test_sec_ch_ua_headers_fallback_major_on_unparseable_ua(plugin, caplog):
+    caplog.set_level("WARNING")
+    headers = plugin._sec_ch_ua_headers("linux", "NotAChromeUA/1.0")
+    assert '"Google Chrome";v="144"' in headers["sec-ch-ua"]
+    assert any("Unable to parse Chrome major version" in rec.message for rec in caplog.records)
+
+
+def test_generate_x_browser_validation_matches_reference_value(plugin):
+    api_key = plugin.LENS_PLATFORM_PROFILES["macos"]["api_key"]
+    user_agent = plugin.LENS_PLATFORM_PROFILES["macos"]["user_agent"]
+    assert (
+        plugin._generate_x_browser_validation(api_key, user_agent)
+        == "YX3LzjiV26KLi9dp+0FecwLxpEU="
+    )
 
 
 def test_xml_bbox_union_helpers(plugin):
@@ -167,10 +177,9 @@ def test_add_options_and_engine_metadata(plugin, monkeypatch):
     assert args.chromelens_dump_debug is True
 
     engine = plugin.ChromeLensEngine()
-    assert plugin.ChromeLensEngine.version() == "1.0.5"
+    assert plugin.ChromeLensEngine.version() == plugin.__version__
     assert plugin.ChromeLensEngine.creator_tag().startswith("OCRmyPDF-ChromeLens-Ocr ")
     assert str(engine) == "ChromeLensOcr"
-    assert engine.engine_name() == "ChromeLensOcr"
 
     assert engine.languages(None) == {"eng", "auto"}
     assert engine.languages(SimpleNamespace(languages={"rus"})) == {"rus"}
@@ -188,6 +197,75 @@ def test_add_options_and_engine_metadata(plugin, monkeypatch):
     assert engine.get_orientation(Path("image.png"), opts) == 42.0
     assert called["kwargs"]["engine_mode"] == 1
     assert called["kwargs"]["timeout"] == 5
+
+
+def test_generate_hocr_applies_initial_jitter_for_parallel_jobs(plugin, monkeypatch, tmp_path):
+    input_img = tmp_path / "input.png"
+    _write_rgba_image(input_img, size=(80, 60))
+    engine = plugin.ChromeLensEngine()
+
+    sleep_calls = []
+
+    monkeypatch.setattr(plugin.random, "uniform", lambda _a, _b: 0.123)
+    monkeypatch.setattr(plugin.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(engine, "_create_lens_proto_request", lambda *_: b"request")
+    monkeypatch.setattr(engine, "_send_proto_request", lambda *_: b"response")
+    monkeypatch.setattr(engine, "_strict_parse_hierarchical", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(engine, "_write_output_hierarchical", lambda *_args, **_kwargs: None)
+
+    opts = SimpleNamespace(
+        chromelens_dump_debug=False,
+        keep_temporary_files=False,
+        chromelens_no_dehyphenation=True,
+        chromelens_max_dehyphen_len=10,
+        jobs=4,
+    )
+    engine.generate_hocr(input_img, tmp_path / "out.hocr", output_text=tmp_path / "out.txt", options=opts)
+    assert sleep_calls == [0.123]
+
+
+def test_generate_hocr_applies_initial_jitter_for_single_job(plugin, monkeypatch, tmp_path):
+    input_img = tmp_path / "input.png"
+    _write_rgba_image(input_img, size=(80, 60))
+    engine = plugin.ChromeLensEngine()
+
+    sleep_calls = []
+
+    monkeypatch.setattr(plugin.random, "uniform", lambda _a, _b: 0.045)
+    monkeypatch.setattr(plugin.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(engine, "_create_lens_proto_request", lambda *_: b"request")
+    monkeypatch.setattr(engine, "_send_proto_request", lambda *_: b"response")
+    monkeypatch.setattr(engine, "_strict_parse_hierarchical", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(engine, "_write_output_hierarchical", lambda *_args, **_kwargs: None)
+
+    opts = SimpleNamespace(
+        chromelens_dump_debug=False,
+        keep_temporary_files=False,
+        chromelens_no_dehyphenation=True,
+        chromelens_max_dehyphen_len=10,
+        jobs=1,
+    )
+    engine.generate_hocr(input_img, tmp_path / "out.hocr", output_text=tmp_path / "out.txt", options=opts)
+    assert sleep_calls == [0.045]
+
+
+def test_direct_file_import_works_with_hardcoded_version(plugin):
+    import importlib.util
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    plugin_path = root / "src" / "ocrmypdf_chromelens_ocr" / "plugin.py"
+    expected_version = plugin.__version__
+
+    spec = importlib.util.spec_from_file_location("chromelens_plugin_direct", plugin_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    try:
+        spec.loader.exec_module(module)
+        assert module.__version__ == expected_version
+        assert module.ChromeLensEngine.version() == expected_version
+    finally:
+        sys.modules.pop("chromelens_plugin_direct", None)
 
 
 def test_generate_hocr_success_with_debug_and_downscale(plugin, monkeypatch, tmp_path):
@@ -470,18 +548,28 @@ def test_send_proto_request_adds_chrome_validation_headers(plugin, monkeypatch):
     monkeypatch.setattr(plugin.requests, "post", fake_post)
     monkeypatch.setattr(plugin.time, "sleep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(plugin.random, "uniform", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(plugin.sys, "platform", "linux")
 
     response = engine._send_proto_request(b"payload")
+    expected_api_key = plugin.LENS_PLATFORM_PROFILES["linux"]["api_key"]
+    expected_user_agent = plugin.LENS_PLATFORM_PROFILES["linux"]["user_agent"]
+    expected_browser_year = plugin.LENS_PLATFORM_PROFILES["linux"]["browser_year"]
+    expected_platform = plugin.LENS_PLATFORM_PROFILES["linux"]["sec_ch_ua_platform"]
 
     assert response == b"ok"
     assert captured["url"] == plugin.LENS_PROTO_ENDPOINT
     assert captured["data"] == b"payload"
     assert captured["timeout"] == 120
+    assert captured["headers"]["X-Goog-Api-Key"] == expected_api_key
+    assert captured["headers"]["User-Agent"] == expected_user_agent
     assert captured["headers"]["x-browser-channel"] == "stable"
-    assert captured["headers"]["x-browser-year"] == "2025"
+    assert captured["headers"]["x-browser-year"] == str(expected_browser_year)
+    assert captured["headers"]["sec-ch-ua-mobile"] == "?0"
+    assert captured["headers"]["sec-ch-ua-platform"] == f'"{expected_platform}"'
+    assert '"Google Chrome";v="144"' in captured["headers"]["sec-ch-ua"]
     assert (
         captured["headers"]["x-browser-validation"]
-        == plugin._generate_x_browser_validation(plugin.LENS_USER_AGENT)
+        == plugin._generate_x_browser_validation(expected_api_key, expected_user_agent)
     )
 
 
@@ -709,7 +797,12 @@ def test_write_output_hierarchical_writes_hocr_and_text(plugin, tmp_path):
 def test_generate_pdf_raises_not_implemented(plugin):
     engine = plugin.ChromeLensEngine()
     with pytest.raises(NotImplementedError):
-        engine.generate_pdf(Path("in.png"), Path("out.pdf"), Path("out.hocr"))
+        engine.generate_pdf(
+            input_file=Path("in.png"),
+            output_pdf=Path("out.pdf"),
+            output_text=Path("out.txt"),
+            options=SimpleNamespace(),
+        )
 
 
 def test_get_ocr_engine_v17_selection(plugin):
@@ -721,7 +814,13 @@ def test_get_ocr_engine_v17_selection(plugin):
         assert plugin.get_ocr_engine(SimpleNamespace(ocr_engine="tesseract")) is None
         assert isinstance(plugin.get_ocr_engine(SimpleNamespace(ocr_engine="auto")), plugin.ChromeLensEngine)
         assert isinstance(plugin.get_ocr_engine(SimpleNamespace(ocr_engine="chromelens")), plugin.ChromeLensEngine)
+        # Patch should be active after selecting chromelens
         assert unicodedata.normalize("NFKC", "x¹") == "x¹"
+
+        # Selecting another engine must reverse the patch
+        assert plugin.get_ocr_engine(SimpleNamespace(ocr_engine="tesseract")) is None
+        assert plugin._nfkc_patch_applied is False
+        assert unicodedata.normalize("NFKC", "x¹") == plugin._original_normalize("NFKC", "x¹")
     finally:
         unicodedata.normalize = original
         plugin._nfkc_patch_applied = False
