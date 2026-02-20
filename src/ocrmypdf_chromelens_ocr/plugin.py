@@ -5,6 +5,7 @@ import math
 import random
 import re
 import struct
+import sys
 import time
 import unicodedata
 import uuid
@@ -55,8 +56,6 @@ def _remove_nfkc_patch():
 
 # --- Constants ---
 LENS_PROTO_ENDPOINT = 'https://lensfrontend-pa.googleapis.com/v1/crupload'
-LENS_API_KEY = 'AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY'
-LENS_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36'
 LENS_ACCEPT_LANGUAGE = 'en-US,en;q=0.9'
 LENS_LOCALE_LANGUAGE = 'en'
 LENS_LOCALE_REGION = 'US'
@@ -74,10 +73,34 @@ UPLOAD_JPEG_QUALITY = 95
 MAX_DIMENSION_V16 = 1600
 MAX_DIMENSION_V17 = 1200
 
-LENS_PLATFORM_API_KEYS = {
-    "windows": "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
-    "linux": "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
-    "macos": "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
+LENS_PLATFORM_PROFILES = {
+    "windows": {
+        "api_key": "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+        ),
+        "sec_ch_ua_platform": "Windows",
+        "browser_year": 2025,
+    },
+    "linux": {
+        "api_key": "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
+        "user_agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+        ),
+        "sec_ch_ua_platform": "Linux",
+        "browser_year": 2025,
+    },
+    "macos": {
+        "api_key": "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
+        "user_agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+        ),
+        "sec_ch_ua_platform": "macOS",
+        "browser_year": 2025,
+    },
 }
 
 
@@ -97,33 +120,55 @@ def _is_ocrmypdf_v17_or_newer() -> bool:
         return major >= 17
 
 
-def _platform_api_key_from_user_agent(user_agent: str) -> str:
-    ua = user_agent.lower()
-    if "windows" in ua:
-        return LENS_PLATFORM_API_KEYS["windows"]
-    if "linux" in ua:
-        return LENS_PLATFORM_API_KEYS["linux"]
-    if "macintosh" in ua or "mac os x" in ua:
-        return LENS_PLATFORM_API_KEYS["macos"]
-    raise OcrEngineError("Unable to determine platform API key from user agent")
+def _runtime_lens_platform() -> str:
+    platform = sys.platform
+    if platform.startswith("win"):
+        return "windows"
+    if platform.startswith("linux"):
+        return "linux"
+    if platform == "darwin":
+        return "macos"
+
+    logger.warning("Unknown platform '%s'; defaulting to macOS Lens profile", platform)
+    return "macos"
 
 
-def _generate_x_browser_validation(user_agent: str) -> str:
+def _lens_request_identity() -> tuple[str, str, int, str]:
+    platform_name = _runtime_lens_platform()
+    profile = LENS_PLATFORM_PROFILES[platform_name]
+    return (
+        profile["api_key"],
+        profile["user_agent"],
+        profile["browser_year"],
+        platform_name,
+    )
+
+
+def _chrome_major_from_user_agent(user_agent: str) -> int:
+    match = re.search(r"Chrome/(\d+)", user_agent)
+    if match:
+        return int(match.group(1))
+    logger.warning("Unable to parse Chrome major version from user agent; defaulting to 144")
+    return 144
+
+
+def _sec_ch_ua_headers(platform_name: str, user_agent: str) -> dict[str, str]:
+    chrome_major = _chrome_major_from_user_agent(user_agent)
+    platform_value = LENS_PLATFORM_PROFILES[platform_name]["sec_ch_ua_platform"]
+    return {
+        "sec-ch-ua": (
+            f'"Not:A-Brand";v="99", "Google Chrome";v="{chrome_major}", "Chromium";v="{chrome_major}"'
+        ),
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": f'"{platform_value}"',
+    }
+
+
+def _generate_x_browser_validation(api_key: str, user_agent: str) -> str:
     # Mirrors Chrome's header generation: base64(sha1(api_key + user_agent))
-    api_key = _platform_api_key_from_user_agent(user_agent)
     digest = hashlib.sha1((api_key + user_agent).encode("utf-8")).digest()
     return base64.b64encode(digest).decode("ascii")
 
-
-def _chrome_year_from_user_agent(user_agent: str) -> int:
-    # Chrome milestone cadence is monthly. Anchor: M109 started in 2023.
-    match = re.search(r"Chrome/(\d+)", user_agent)
-    if not match:
-        return time.gmtime().tm_year
-    major = int(match.group(1))
-    if major < 109:
-        return time.gmtime().tm_year
-    return 2023 + ((major - 109) // 12)
 
 # --- Utilities ---
 def xml_sanitize(text):
@@ -549,12 +594,12 @@ class ChromeLensEngine(OcrEngine):
         return server_request.get_bytes()
 
     def _send_proto_request(self, proto_bytes):
-        browser_year = _chrome_year_from_user_agent(LENS_USER_AGENT)
-        browser_validation = _generate_x_browser_validation(LENS_USER_AGENT)
+        api_key, user_agent, browser_year, platform_name = _lens_request_identity()
+        browser_validation = _generate_x_browser_validation(api_key, user_agent)
         headers = {
             'Content-Type': 'application/x-protobuf',
-            'X-Goog-Api-Key': LENS_API_KEY,
-            'User-Agent': LENS_USER_AGENT,
+            'X-Goog-Api-Key': api_key,
+            'User-Agent': user_agent,
             'Accept': '*/*',
             'Accept-Encoding': 'gzip, deflate, br',
             'Accept-Language': LENS_ACCEPT_LANGUAGE,
@@ -563,6 +608,7 @@ class ChromeLensEngine(OcrEngine):
             'x-browser-copyright': f'Copyright {browser_year} Google LLC. All rights reserved.',
             'x-browser-validation': browser_validation,
         }
+        headers.update(_sec_ch_ua_headers(platform_name, user_agent))
         
         max_retries = 3
         last_exception = None

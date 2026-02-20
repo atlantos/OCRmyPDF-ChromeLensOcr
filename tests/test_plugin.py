@@ -2,7 +2,6 @@ import argparse
 import json
 import math
 import struct
-import time
 import unicodedata
 from pathlib import Path
 from types import SimpleNamespace
@@ -85,46 +84,48 @@ def test_is_ocrmypdf_v17_invalid_version_fallback(plugin, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("user_agent", "expected_key"),
+    ("sys_platform", "profile"),
     [
-        (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            "AIzaSyA2KlwBX3mkFo30om9LUFYQhpqLoa_BNhE",
-        ),
-        (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            "AIzaSyBqJZh-7pA44blAaAkH6490hUFOwX0KCYM",
-        ),
-        (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            "AIzaSyDr2UxVnv_U85AbhhY8XSHSIavUW0DC-sY",
-        ),
+        ("win32", "windows"),
+        ("linux", "linux"),
+        ("darwin", "macos"),
     ],
 )
-def test_platform_api_key_from_user_agent(plugin, user_agent, expected_key):
-    assert plugin._platform_api_key_from_user_agent(user_agent) == expected_key
-
-
-def test_platform_api_key_from_user_agent_raises_on_unknown_os(plugin):
-    with pytest.raises(plugin.OcrEngineError):
-        plugin._platform_api_key_from_user_agent("CustomAgent/1.0")
-
-
-def test_generate_x_browser_validation_matches_reference_value(plugin):
+def test_runtime_lens_platform_and_identity(plugin, monkeypatch, sys_platform, profile):
+    monkeypatch.setattr(plugin.sys, "platform", sys_platform)
+    assert plugin._runtime_lens_platform() == profile
+    api_key, user_agent, browser_year, platform_name = plugin._lens_request_identity()
+    assert platform_name == profile
+    assert api_key == plugin.LENS_PLATFORM_PROFILES[profile]["api_key"]
+    assert user_agent == plugin.LENS_PLATFORM_PROFILES[profile]["user_agent"]
+    assert browser_year == plugin.LENS_PLATFORM_PROFILES[profile]["browser_year"]
     assert (
-        plugin._generate_x_browser_validation(plugin.LENS_USER_AGENT)
-        == "YX3LzjiV26KLi9dp+0FecwLxpEU="
+        plugin.LENS_PLATFORM_PROFILES[profile]["sec_ch_ua_platform"]
+        in plugin._sec_ch_ua_headers(profile, user_agent)["sec-ch-ua-platform"]
     )
 
 
-def test_chrome_year_from_user_agent(plugin):
-    assert plugin._chrome_year_from_user_agent("Chrome/144.0.0.0") == 2025
-    assert plugin._chrome_year_from_user_agent("Chrome/120.0.0.0") == 2023
-    assert plugin._chrome_year_from_user_agent("Chrome/108.0.0.0") == time.gmtime().tm_year
-    assert plugin._chrome_year_from_user_agent("NoChromeToken/1.0") == time.gmtime().tm_year
+def test_runtime_lens_platform_unknown_fallback(plugin, monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setattr(plugin.sys, "platform", "plan9")
+    assert plugin._runtime_lens_platform() == "macos"
+    assert any("defaulting to macOS Lens profile" in rec.message for rec in caplog.records)
+
+
+def test_sec_ch_ua_headers_fallback_major_on_unparseable_ua(plugin, caplog):
+    caplog.set_level("WARNING")
+    headers = plugin._sec_ch_ua_headers("linux", "NotAChromeUA/1.0")
+    assert '"Google Chrome";v="144"' in headers["sec-ch-ua"]
+    assert any("Unable to parse Chrome major version" in rec.message for rec in caplog.records)
+
+
+def test_generate_x_browser_validation_matches_reference_value(plugin):
+    api_key = plugin.LENS_PLATFORM_PROFILES["macos"]["api_key"]
+    user_agent = plugin.LENS_PLATFORM_PROFILES["macos"]["user_agent"]
+    assert (
+        plugin._generate_x_browser_validation(api_key, user_agent)
+        == "YX3LzjiV26KLi9dp+0FecwLxpEU="
+    )
 
 
 def test_xml_bbox_union_helpers(plugin):
@@ -479,18 +480,28 @@ def test_send_proto_request_adds_chrome_validation_headers(plugin, monkeypatch):
     monkeypatch.setattr(plugin.requests, "post", fake_post)
     monkeypatch.setattr(plugin.time, "sleep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(plugin.random, "uniform", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(plugin.sys, "platform", "linux")
 
     response = engine._send_proto_request(b"payload")
+    expected_api_key = plugin.LENS_PLATFORM_PROFILES["linux"]["api_key"]
+    expected_user_agent = plugin.LENS_PLATFORM_PROFILES["linux"]["user_agent"]
+    expected_browser_year = plugin.LENS_PLATFORM_PROFILES["linux"]["browser_year"]
+    expected_platform = plugin.LENS_PLATFORM_PROFILES["linux"]["sec_ch_ua_platform"]
 
     assert response == b"ok"
     assert captured["url"] == plugin.LENS_PROTO_ENDPOINT
     assert captured["data"] == b"payload"
     assert captured["timeout"] == 120
+    assert captured["headers"]["X-Goog-Api-Key"] == expected_api_key
+    assert captured["headers"]["User-Agent"] == expected_user_agent
     assert captured["headers"]["x-browser-channel"] == "stable"
-    assert captured["headers"]["x-browser-year"] == "2025"
+    assert captured["headers"]["x-browser-year"] == str(expected_browser_year)
+    assert captured["headers"]["sec-ch-ua-mobile"] == "?0"
+    assert captured["headers"]["sec-ch-ua-platform"] == f'"{expected_platform}"'
+    assert '"Google Chrome";v="144"' in captured["headers"]["sec-ch-ua"]
     assert (
         captured["headers"]["x-browser-validation"]
-        == plugin._generate_x_browser_validation(plugin.LENS_USER_AGENT)
+        == plugin._generate_x_browser_validation(expected_api_key, expected_user_agent)
     )
 
 
