@@ -177,10 +177,9 @@ def test_add_options_and_engine_metadata(plugin, monkeypatch):
     assert args.chromelens_dump_debug is True
 
     engine = plugin.ChromeLensEngine()
-    assert plugin.ChromeLensEngine.version() == "1.0.5"
+    assert plugin.ChromeLensEngine.version() == plugin.__version__
     assert plugin.ChromeLensEngine.creator_tag().startswith("OCRmyPDF-ChromeLens-Ocr ")
     assert str(engine) == "ChromeLensOcr"
-    assert engine.engine_name() == "ChromeLensOcr"
 
     assert engine.languages(None) == {"eng", "auto"}
     assert engine.languages(SimpleNamespace(languages={"rus"})) == {"rus"}
@@ -198,6 +197,25 @@ def test_add_options_and_engine_metadata(plugin, monkeypatch):
     assert engine.get_orientation(Path("image.png"), opts) == 42.0
     assert called["kwargs"]["engine_mode"] == 1
     assert called["kwargs"]["timeout"] == 5
+
+
+def test_direct_file_import_works_with_hardcoded_version(plugin):
+    import importlib.util
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    plugin_path = root / "src" / "ocrmypdf_chromelens_ocr" / "plugin.py"
+    expected_version = plugin.__version__
+
+    spec = importlib.util.spec_from_file_location("chromelens_plugin_direct", plugin_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    try:
+        spec.loader.exec_module(module)
+        assert module.__version__ == expected_version
+        assert module.ChromeLensEngine.version() == expected_version
+    finally:
+        sys.modules.pop("chromelens_plugin_direct", None)
 
 
 def test_generate_hocr_success_with_debug_and_downscale(plugin, monkeypatch, tmp_path):
@@ -729,7 +747,12 @@ def test_write_output_hierarchical_writes_hocr_and_text(plugin, tmp_path):
 def test_generate_pdf_raises_not_implemented(plugin):
     engine = plugin.ChromeLensEngine()
     with pytest.raises(NotImplementedError):
-        engine.generate_pdf(Path("in.png"), Path("out.pdf"), Path("out.hocr"))
+        engine.generate_pdf(
+            input_file=Path("in.png"),
+            output_pdf=Path("out.pdf"),
+            output_text=Path("out.txt"),
+            options=SimpleNamespace(),
+        )
 
 
 def test_get_ocr_engine_v17_selection(plugin):

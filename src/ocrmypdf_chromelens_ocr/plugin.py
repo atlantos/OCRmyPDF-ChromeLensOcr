@@ -18,6 +18,8 @@ import requests
 from PIL import Image
 from packaging.version import InvalidVersion, Version
 
+__version__ = "1.0.5"
+
 # ocrmypdf imports
 import ocrmypdf
 from ocrmypdf import OcrEngine, hookimpl
@@ -300,16 +302,13 @@ def add_options(parser):
 class ChromeLensEngine(OcrEngine):
     @staticmethod
     def version():
-        return "1.0.5"
+        return __version__
 
     @classmethod
     def creator_tag(cls, options=None):
         return f"OCRmyPDF-ChromeLens-Ocr {cls.version()}"
 
     def __str__(self):
-        return "ChromeLensOcr"
-
-    def engine_name(self):
         return "ChromeLensOcr"
 
     def languages(self, options):
@@ -390,7 +389,7 @@ class ChromeLensEngine(OcrEngine):
                 img_bytes = buffer.getvalue()
                 final_w, final_h = process_img.size
         except Exception as e:
-            raise OcrEngineError(f"Failed to process image: {e}")
+            raise OcrEngineError(f"Failed to process image: {e}") from e
 
         try:
             proto_payload = self._create_lens_proto_request(img_bytes, final_w, final_h)
@@ -424,7 +423,7 @@ class ChromeLensEngine(OcrEngine):
             layout_structure = self._sort_lines_by_rotation(layout_structure)
             
         except Exception as e:
-            raise OcrEngineError(f"Google Lens logic failed: {e}")
+            raise OcrEngineError(f"Google Lens logic failed: {e}") from e
 
         self._write_output_hierarchical(layout_structure, width, height, dpi, input_file, output_hocr, output_text)
 
@@ -630,17 +629,27 @@ class ChromeLensEngine(OcrEngine):
                 
                 # If non-200, log and allow retry
                 error_msg = f"Server returned {response.status_code}. Response: {response.text[:200]}"
-                logger.warning(f"ChromeLens API attempt {attempt+1}/{max_retries} failed: {error_msg}")
+                logger.warning(
+                    "ChromeLens API attempt %d/%d failed: %s",
+                    attempt + 1,
+                    max_retries,
+                    error_msg,
+                )
                 last_exception = OcrEngineError(error_msg)
 
             except (requests.RequestException, OcrEngineError) as e:
-                logger.warning(f"ChromeLens API connection failed (Attempt {attempt+1}/{max_retries}): {e}")
+                logger.warning(
+                    "ChromeLens API connection failed (Attempt %d/%d): %s",
+                    attempt + 1,
+                    max_retries,
+                    e,
+                )
                 last_exception = OcrEngineError(f"Network error: {e}")
 
             # Backoff logic if we haven't succeeded yet
             if attempt < max_retries - 1:
                 sleep_time = random.uniform(4.0, 10.0)
-                logger.info(f"Retrying in {sleep_time:.1f} seconds...")
+                logger.info("Retrying in %.1f seconds...", sleep_time)
                 time.sleep(sleep_time)
 
         # If loop finishes without success
@@ -920,7 +929,7 @@ class ChromeLensEngine(OcrEngine):
             with open(output_text, "w", encoding="utf-8") as f:
                 f.write("\n".join(full_text_lines).strip())
 
-    def generate_pdf(self, input_file: Path, output_pdf: Path, hocr_file: Path, recalculate_coords: bool = False, options=None):
+    def generate_pdf(self, input_file: Path, output_pdf: Path, output_text: Path, options=None):
         raise NotImplementedError()
 
 if _is_ocrmypdf_v17_or_newer():

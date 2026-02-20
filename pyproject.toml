@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ocrmypdf-chromelens-ocr"
-version = "1.0.5"
+dynamic = ["version"]
 description = "OCRmyPDF plugin using Google Lens API for OCR"
 readme = "README.md"
 authors = [
@@ -41,3 +41,6 @@ test = [
 
 [project.entry-points."ocrmypdf"]
 chromelens = "ocrmypdf_chromelens_ocr"
+
+[tool.setuptools.dynamic]
+version = {attr = "ocrmypdf_chromelens_ocr.plugin.__version__"}
