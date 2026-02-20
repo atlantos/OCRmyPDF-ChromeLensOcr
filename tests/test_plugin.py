@@ -199,6 +199,56 @@ def test_add_options_and_engine_metadata(plugin, monkeypatch):
     assert called["kwargs"]["timeout"] == 5
 
 
+def test_generate_hocr_applies_initial_jitter_for_parallel_jobs(plugin, monkeypatch, tmp_path):
+    input_img = tmp_path / "input.png"
+    _write_rgba_image(input_img, size=(80, 60))
+    engine = plugin.ChromeLensEngine()
+
+    sleep_calls = []
+
+    monkeypatch.setattr(plugin.random, "uniform", lambda _a, _b: 0.123)
+    monkeypatch.setattr(plugin.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(engine, "_create_lens_proto_request", lambda *_: b"request")
+    monkeypatch.setattr(engine, "_send_proto_request", lambda *_: b"response")
+    monkeypatch.setattr(engine, "_strict_parse_hierarchical", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(engine, "_write_output_hierarchical", lambda *_args, **_kwargs: None)
+
+    opts = SimpleNamespace(
+        chromelens_dump_debug=False,
+        keep_temporary_files=False,
+        chromelens_no_dehyphenation=True,
+        chromelens_max_dehyphen_len=10,
+        jobs=4,
+    )
+    engine.generate_hocr(input_img, tmp_path / "out.hocr", output_text=tmp_path / "out.txt", options=opts)
+    assert sleep_calls == [0.123]
+
+
+def test_generate_hocr_applies_initial_jitter_for_single_job(plugin, monkeypatch, tmp_path):
+    input_img = tmp_path / "input.png"
+    _write_rgba_image(input_img, size=(80, 60))
+    engine = plugin.ChromeLensEngine()
+
+    sleep_calls = []
+
+    monkeypatch.setattr(plugin.random, "uniform", lambda _a, _b: 0.045)
+    monkeypatch.setattr(plugin.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(engine, "_create_lens_proto_request", lambda *_: b"request")
+    monkeypatch.setattr(engine, "_send_proto_request", lambda *_: b"response")
+    monkeypatch.setattr(engine, "_strict_parse_hierarchical", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(engine, "_write_output_hierarchical", lambda *_args, **_kwargs: None)
+
+    opts = SimpleNamespace(
+        chromelens_dump_debug=False,
+        keep_temporary_files=False,
+        chromelens_no_dehyphenation=True,
+        chromelens_max_dehyphen_len=10,
+        jobs=1,
+    )
+    engine.generate_hocr(input_img, tmp_path / "out.hocr", output_text=tmp_path / "out.txt", options=opts)
+    assert sleep_calls == [0.045]
+
+
 def test_direct_file_import_works_with_hardcoded_version(plugin):
     import importlib.util
     import sys

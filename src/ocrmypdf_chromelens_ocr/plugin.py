@@ -74,6 +74,7 @@ UPLOAD_FORMAT = "JPEG"
 UPLOAD_JPEG_QUALITY = 95
 MAX_DIMENSION_V16 = 1600
 MAX_DIMENSION_V17 = 1200
+INITIAL_REQUEST_JITTER_MAX_SEC = 0.35
 
 LENS_PLATFORM_PROFILES = {
     "windows": {
@@ -392,6 +393,12 @@ class ChromeLensEngine(OcrEngine):
             raise OcrEngineError(f"Failed to process image: {e}") from e
 
         try:
+            # Stagger startup requests to reduce burst collisions.
+            jitter = random.uniform(0.0, INITIAL_REQUEST_JITTER_MAX_SEC)
+            if jitter > 0:
+                logger.debug("Applying initial request jitter of %.3f seconds", jitter)
+                time.sleep(jitter)
+
             proto_payload = self._create_lens_proto_request(img_bytes, final_w, final_h)
             response_data = self._send_proto_request(proto_payload)
             layout_structure = self._strict_parse_hierarchical(
